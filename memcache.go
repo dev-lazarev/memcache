@@ -1,19 +1,3 @@
-/*
-Copyright 2011 Google Inc.
-
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
-
-     http://www.apache.org/licenses/LICENSE-2.0
-
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
-*/
-
 // Package memcache provides a client for the memcached cache server.
 package memcache
 
@@ -21,10 +5,12 @@ import (
 	"bytes"
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"io"
 	"io/ioutil"
 	"net"
 	"runtime"
+	"strings"
 	"sync"
 	"time"
 )
@@ -46,7 +32,7 @@ var (
 	// CompareAndSwap) failed because the condition was not satisfied.
 	ErrNotStored = errors.New("memcache: item not stored")
 
-	// ErrServer means that a server error occurred.
+	// ErrServerError ErrServer means that a server error occurred.
 	ErrServerError = errors.New("memcache: server error")
 
 	// ErrNoStats means that no statistics were available.
@@ -114,6 +100,13 @@ const (
 	cmdPrependQ
 )
 
+// Auth Ops
+const (
+	opAuthList command = command(iota + 0x20)
+	opAuthStart
+	opAuthStep
+)
+
 type response uint16
 
 const (
@@ -127,6 +120,7 @@ const (
 	respWrongVBucket
 	respAuthErr
 	respAuthContinue
+	respAuthUnknown
 	respUnknownCmd   = 0x81
 	respOOM          = 0x82
 	respNotSupported = 0x83
@@ -311,9 +305,6 @@ type Item struct {
 	// Value is the Item's value.
 	Value []byte
 
-	// Object is the Item's value for use with a Codec.
-	Object interface{}
-
 	// Flags are server-opaque flags whose semantics are entirely
 	// up to the app.
 	Flags uint32
@@ -438,11 +429,63 @@ func (c *Client) getConn(addr *Addr) (*conn, error) {
 			nc:   nc,
 			addr: addr,
 		}
+		if cn.addr.auth != nil {
+			err = c.auth(cn)
+			if err != nil {
+				return nil, err
+			}
+		}
 	}
 	if c.timeout > 0 {
 		cn.nc.SetDeadline(time.Now().Add(c.timeout))
 	}
+
 	return cn, nil
+}
+
+// Auth performs SASL authentication (using the PLAIN method) with the server.
+func (c *Client) auth(conn *conn) error {
+	if len(conn.addr.auth.login) == 0 && len(conn.addr.auth.password) == 0 {
+		return nil
+	}
+	s, err := c.authList(conn)
+	if err != nil {
+		return err
+	}
+
+	switch {
+	case strings.Index(string(s.Value), "PLAIN") != -1:
+		err = c.authPlain(conn)
+		if err != nil {
+			return err
+		}
+		return nil
+	}
+
+	return response(respAuthUnknown).asError()
+}
+
+// authList runs the SASL authentication list command with the server to
+// retrieve the list of support authentication mechanisms.
+func (c *Client) authList(conn *conn) (*Item, error) {
+	err := c.sendConnCommand(conn, "", opAuthList, nil, 0, nil)
+	if err != nil {
+		return nil, err
+	}
+	return c.parseItemResponse("", conn, true)
+}
+
+// authPlain performs SASL authentication using the PLAIN method.
+func (c *Client) authPlain(conn *conn) error {
+	err := c.sendConnCommand(conn, "PLAIN", opAuthStart, []byte(fmt.Sprintf("\x00%s\x00%s", conn.addr.auth.login, conn.addr.auth.password)), 0, nil)
+	if err != nil {
+		return err
+	}
+	_, err = c.parseItemResponse("PLAIN", conn, false)
+	if err != nil {
+		return err
+	}
+	return nil
 }
 
 // Get gets the item for the given key. ErrCacheMiss is returned for a

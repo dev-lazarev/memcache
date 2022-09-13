@@ -36,19 +36,32 @@ type ServerList struct {
 // to the provided servers.
 func NewServerList(servers ...string) (*ServerList, error) {
 	addrs := make([]*Addr, len(servers))
-	for i, server := range servers {
+	for i, s := range servers {
+		separatorIndex := strings.LastIndex(s, "@")
+		server := s[separatorIndex+1:]
+		var auth *Auth
+		if separatorIndex > 0 {
+			loginPass := s[0:separatorIndex]
+			loginPassSeparatorIndex := strings.Index(loginPass, ":")
+			login := loginPass[0:loginPassSeparatorIndex]
+			pass := loginPass[loginPassSeparatorIndex+1:]
+			auth = &Auth{
+				login:    login,
+				password: pass,
+			}
+		}
 		if strings.Contains(server, "/") {
 			addr, err := net.ResolveUnixAddr("unix", server)
 			if err != nil {
 				return nil, err
 			}
-			addrs[i] = NewAddr(addr)
+			addrs[i] = NewAddr(addr, auth)
 		} else {
 			tcpaddr, err := net.ResolveTCPAddr("tcp", server)
 			if err != nil {
 				return nil, err
 			}
-			addrs[i] = NewAddr(tcpaddr)
+			addrs[i] = NewAddr(tcpaddr, auth)
 		}
 	}
 	return &ServerList{addrs: addrs}, nil

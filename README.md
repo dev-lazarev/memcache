@@ -1,24 +1,24 @@
-Memcache Client in Go (golang)
+Memcache Client in Go (golang) with auth
 =============================
 
 ## Installing
 
-    $ go get github.com/rainycape/memcache
+    $ go get github.com/dev-lazarev/memcache
 
 After this command *memcache* is ready to use. Its source will be in:
 
-    $GOPATH/src/github.com/rainycape/memcache
+    $GOPATH/src/github.com/dev-lazarev/memcache
 
 You can use `go get -u -a` for update all installed packages.
 
 ## Example
 
     import (
-            "github.com/rainycape/memcache"
+            "github.com/dev-lazarev/memcache"
     )
 
     func main() {
-         mc := memcache.New("10.0.0.1:11211", "10.0.0.2:11211", "10.0.0.3:11212")
+         mc := memcache.New("user:password@110.0.0.1:11211", "10.0.0.2:11211", "10.0.0.3:11212")
          mc.Set(&memcache.Item{Key: "foo", Value: []byte("my value")})
 
          it, err := mc.Get("foo")
@@ -28,9 +28,9 @@ You can use `go get -u -a` for update all installed packages.
 ## About
 
 This is a memcache client library for the Go programming language
-(http://golang.org/). This is a high performance fork of the original
-library at http://github.com/bradfitz/gomemcache. The following is
-a comparison between the original library and this one:
+(http://golang.org/). This is a high performance fork of the original library
+at http://github.com/rainycape/memcache(fork github.com/bradfitz/gomemcache). The following is a comparison between the
+original library and this one:
 
     benchmark                               old ns/op    new ns/op    delta
     BenchmarkSetGet                            214443       138200  -35.55%
