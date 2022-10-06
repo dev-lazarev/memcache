@@ -1,0 +1,10 @@
+version: "3.9"
+services:
+  memcached:
+    image: bitnami/memcached:latest
+    ports:
+      - '11211:11211'
+    environment:
+      - MEMCACHED_MAX_CONNECTIONS=300
+      - MEMCACHED_USERNAME=my_user1
+      - MEMCACHED_PASSWORD=my_password

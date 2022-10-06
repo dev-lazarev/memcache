@@ -1,80 +1,53 @@
 package memcache
 
 import (
-	"hash/crc32"
+	"fmt"
 	"net"
 	"strings"
+
+	"github.com/silenceper/pool"
 )
 
-// Servers is the interface used to manage a set of memcached
-// servers.
-//
-// Implementations must be safely accessible from multiple
-// goroutines.
-type Servers interface {
-	// PickServer selects one server from the ones by
-	// managed by the Servers instance, based on the
-	// given key.
-	PickServer(key string) (*Addr, error)
-	// Servers returns all the servers managed by the
-	// Servers instance.
-	Servers() ([]*Addr, error)
-}
-
-// ServerList is an implementation of the Servers interface.
-// To initialize a ServerList use NewServerList.
-type ServerList struct {
-	addrs []*Addr
-}
-
-// NewServerList returns a new ServerList with the given servers.
-// All servers have the same weight. To give a server more weight,
-// list it multiple times.
-//
-// NewServerList returns an error if any of the received addresses
-// is not valid or fails to resolve, but it doesn't try to connect
-// to the provided servers.
-func NewServerList(servers ...string) (*ServerList, error) {
-	addrs := make([]*Addr, len(servers))
-	for i, s := range servers {
-		separatorIndex := strings.LastIndex(s, "@")
-		server := s[separatorIndex+1:]
-		var auth *Auth
-		if separatorIndex > 0 {
-			loginPass := s[0:separatorIndex]
-			loginPassSeparatorIndex := strings.Index(loginPass, ":")
-			login := loginPass[0:loginPassSeparatorIndex]
-			pass := loginPass[loginPassSeparatorIndex+1:]
-			auth = &Auth{
-				login:    login,
-				password: pass,
-			}
+func newPool(addr net.Addr, config Config) (pool.Pool, error) {
+	factory := func() (interface{}, error) {
+		conn, err := net.DialTimeout(addr.Network(), addr.String(), config.ConnectionTimeout)
+		if err != nil {
+			return nil, err
 		}
-		if strings.Contains(server, "/") {
-			addr, err := net.ResolveUnixAddr("unix", server)
+		if config.User == "" && config.Password == "" {
+			return conn, nil
+		}
+		err = sendConnCommand(conn, "", opAuthList, nil, 0, nil)
+		if err != nil {
+			return nil, err
+		}
+		_, _, _, value, err := parseResponse("", conn)
+		if err != nil {
+			return nil, err
+		}
+		if strings.Index(string(value), "PLAIN") != -1 {
+			err = sendConnCommand(conn, "PLAIN", opAuthStart, []byte(fmt.Sprintf("\x00%s\x00%s", config.User, config.Password)), 0, nil)
 			if err != nil {
 				return nil, err
 			}
-			addrs[i] = NewAddr(addr, auth)
-		} else {
-			tcpaddr, err := net.ResolveTCPAddr("tcp", server)
+			_, _, _, _, err = parseResponse("PLAIN", conn)
 			if err != nil {
+				fmt.Println("auth3", conn.LocalAddr(), conn.RemoteAddr())
 				return nil, err
 			}
-			addrs[i] = NewAddr(tcpaddr, auth)
 		}
+		return conn, nil
 	}
-	return &ServerList{addrs: addrs}, nil
-}
 
-func (s *ServerList) PickServer(key string) (*Addr, error) {
-	if len(s.addrs) == 0 {
-		return nil, ErrNoServers
+	closeConn := func(v interface{}) error { return v.(net.Conn).Close() }
+
+	poolConfig := &pool.Config{
+		InitialCap:  config.InitialCap,
+		MaxIdle:     config.MaxIdle,
+		MaxCap:      config.MaxCap,
+		Factory:     factory,
+		Close:       closeConn,
+		IdleTimeout: config.IdleTimeout,
 	}
-	cs := crc32.ChecksumIEEE(stobs(key))
-	return s.addrs[cs%uint32(len(s.addrs))], nil
-}
-
-func (s *ServerList) Servers() ([]*Addr, error) {
-	return s.addrs, nil
+	return pool.NewChannelPool(poolConfig)
 }

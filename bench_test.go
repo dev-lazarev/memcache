@@ -5,12 +5,10 @@ import (
 	"strings"
 	"sync"
 	"testing"
-	"time"
 )
 
 func benchmarkSet(b *testing.B, item *Item) {
 	cmd, c := newUnixServer(b)
-	c.SetTimeout(time.Duration(-1))
 	b.SetBytes(int64(len(item.Key) + len(item.Value)))
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
@@ -25,7 +23,6 @@ func benchmarkSet(b *testing.B, item *Item) {
 
 func benchmarkSetGet(b *testing.B, item *Item) {
 	cmd, c := newUnixServer(b)
-	c.SetTimeout(time.Duration(-1))
 	key := item.Key
 	b.SetBytes(int64(len(item.Key) + len(item.Value)))
 	b.ResetTimer()
@@ -73,7 +70,6 @@ func benchmarkConcurrentSetGet(b *testing.B, item *Item, count int, opcount int)
 	defer runtime.GOMAXPROCS(mp)
 	runtime.GOMAXPROCS(count)
 	cmd, c := newUnixServer(b)
-	c.SetTimeout(time.Duration(-1))
 	// Items are not thread safe
 	items := make([]*Item, count)
 	for ii := range items {
@@ -109,7 +105,6 @@ func benchmarkConcurrentSetGet(b *testing.B, item *Item, count int, opcount int)
 func BenchmarkGetCacheMiss(b *testing.B) {
 	key := "not"
 	cmd, c := newUnixServer(b)
-	c.SetTimeout(time.Duration(-1))
 	c.Delete(key)
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {

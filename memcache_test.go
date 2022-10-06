@@ -11,27 +11,32 @@ import (
 	"time"
 )
 
-const testServer = "localhost:11211"
+var testConfig = Config{
+	Server:            "localhost:11211",
+	User:              "my_user1",
+	Password:          "my_password",
+	InitialCap:        2,
+	MaxIdle:           4,
+	MaxCap:            5,
+	IdleTimeout:       time.Second,
+	ConnectionTimeout: 100 * time.Millisecond,
+}
+
+const testServer = "my_user:my_password@"
 
 func (c *Client) totalOpen() int {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	count := 0
-	for _, v := range c.freeconn {
-		count += len(v)
-	}
-	return count
+	return c.servers.Count()
 }
 
 func newLocalhostServer(tb testing.TB) *Client {
-	c, err := net.Dial("tcp", testServer)
+	c, err := net.Dial("tcp", testConfig.Server)
 	if err != nil {
-		tb.Skip("skipping test; no server running at %s", testServer)
+		tb.Skip(fmt.Sprintf("skipping test; no server running at %s", testServer))
 		return nil
 	}
 	c.Write([]byte("flush_all\r\n"))
 	c.Close()
-	client, err := New(testServer)
+	client, err := New([]Config{testConfig})
 	if err != nil {
 		tb.Fatal(err)
 	}
@@ -54,7 +59,8 @@ func newUnixServer(tb testing.TB) (*exec.Cmd, *Client) {
 		}
 		time.Sleep(time.Duration(25*i) * time.Millisecond)
 	}
-	c, err := New(sock)
+	testConfig.Server = sock
+	c, err := New([]Config{testConfig})
 	if err != nil {
 		tb.Fatal(err)
 	}
