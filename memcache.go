@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"errors"
 	"net"
+	"sync"
 )
 
 func legalKey(key string) bool {
@@ -40,12 +41,33 @@ func NewFromServers(servers *ServerList) *Client {
 // Client is a memcache client.
 // It is safe for unlocked use by multiple concurrent goroutines.
 type Client struct {
+	mu      sync.Mutex
 	servers *ServerList
 }
 
 // Close closes all currently open connections.
 func (c *Client) Close() {
+	c.mu.Lock()
 	c.servers.Release()
+	c.mu.Unlock()
+}
+
+func (c *Client) getConnection(index uint32) (net.Conn, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.servers.GetConnection(index)
+}
+
+func (c *Client) putConnection(index uint32, conn net.Conn) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.servers.PutConnection(index, conn)
+}
+
+func (c *Client) closeConnection(index uint32, conn net.Conn) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.servers.CloseConnection(index, conn)
 }
 
 // Item is an item to be got or stored in a memcached server.
@@ -76,13 +98,13 @@ func (c *Client) Get(key string) (*Item, error) {
 	if err != nil {
 		return nil, err
 	}
-	cn, err := c.servers.GetConnection(serverIndex)
+	cn, err := c.getConnection(serverIndex)
 	if err != nil {
 		return nil, err
 	}
 	err = sendConnCommand(cn, key, cmdGet, nil, 0, nil)
 	if err != nil {
-		_ = c.servers.CloseConnection(serverIndex, cn)
+		_ = c.closeConnection(serverIndex, cn)
 		return nil, err
 	}
 
@@ -90,9 +112,9 @@ func (c *Client) Get(key string) (*Item, error) {
 
 	switch err {
 	case nil, ErrCacheMiss, ErrCASConflict, ErrNotStored, ErrBadIncrDec:
-		_ = c.servers.PutConnection(serverIndex, cn)
+		_ = c.putConnection(serverIndex, cn)
 	default:
-		_ = c.servers.CloseConnection(serverIndex, cn)
+		_ = c.closeConnection(serverIndex, cn)
 	}
 
 	if err != nil {
@@ -127,12 +149,14 @@ func (c *Client) GetMulti(keys []string) (map[string]*Item, error) {
 		keyMap[serverIndex] = append(keyMap[serverIndex], key)
 	}
 
-	var chs []chan *Item
+	mu := sync.Mutex{}
+	items := make(map[string]*Item)
+	wg := sync.WaitGroup{}
+
+	wg.Add(len(keyMap))
 	for addr, keys := range keyMap {
-		ch := make(chan *Item)
-		chs = append(chs, ch)
-		go func(serverIndex uint32, keys []string, ch chan *Item) {
-			defer close(ch)
+		go func(serverIndex uint32, keys []string) {
+			defer wg.Done()
 			cn, err := c.servers.GetConnection(serverIndex)
 			if err != nil {
 				return
@@ -141,9 +165,9 @@ func (c *Client) GetMulti(keys []string) (map[string]*Item, error) {
 				if err = sendConnCommand(cn, k, cmdGetKQ, nil, 0, nil); err != nil {
 					switch err {
 					case nil, ErrCacheMiss, ErrCASConflict, ErrNotStored, ErrBadIncrDec:
-						_ = c.servers.PutConnection(serverIndex, cn)
+						_ = c.putConnection(serverIndex, cn)
 					default:
-						_ = c.servers.CloseConnection(serverIndex, cn)
+						_ = c.closeConnection(serverIndex, cn)
 					}
 					return
 				}
@@ -151,13 +175,12 @@ func (c *Client) GetMulti(keys []string) (map[string]*Item, error) {
 			if err = sendConnCommand(cn, "", cmdNoop, nil, 0, nil); err != nil {
 				switch err {
 				case nil, ErrCacheMiss, ErrCASConflict, ErrNotStored, ErrBadIncrDec:
-					_ = c.servers.PutConnection(serverIndex, cn)
+					_ = c.putConnection(serverIndex, cn)
 				default:
-					_ = c.servers.CloseConnection(serverIndex, cn)
+					_ = c.closeConnection(serverIndex, cn)
 				}
 				return
 			}
-			var item *Item
 			for {
 				hdr, k, extras, value, err := parseResponse("", cn)
 				if err != nil {
@@ -172,24 +195,26 @@ func (c *Client) GetMulti(keys []string) (map[string]*Item, error) {
 					flags = bUint32(extras)
 				}
 
-				item = &Item{
+				mu.Lock()
+				items[string(k)] = &Item{
 					Key:   string(k),
 					Value: value,
 					Flags: flags,
 					casid: bUint64(hdr[16:24]),
 				}
-				ch <- item
+				mu.Unlock()
 			}
-		}(addr, keys, ch)
+			switch err {
+			case nil, ErrCacheMiss, ErrCASConflict, ErrNotStored, ErrBadIncrDec:
+				_ = c.putConnection(serverIndex, cn)
+			default:
+				_ = c.closeConnection(serverIndex, cn)
+			}
+		}(addr, keys)
 	}
+	wg.Wait()
 
-	m := make(map[string]*Item)
-	for _, ch := range chs {
-		for item := range ch {
-			m[item.Key] = item
-		}
-	}
-	return m, nil
+	return items, nil
 }
 
 // Set writes the given item, unconditionally.
@@ -223,28 +248,27 @@ func (c *Client) populateOne(cmd command, item *Item, casid uint64) error {
 	if err != nil {
 		return err
 	}
-	cn, err := c.servers.GetConnection(serverIndex)
+	cn, err := c.getConnection(serverIndex)
 	if err != nil {
 		return err
 	}
 
 	err = sendConnCommand(cn, item.Key, cmd, item.Value, casid, extras)
 	if err != nil {
-		_ = c.servers.CloseConnection(serverIndex, cn)
+		_ = c.closeConnection(serverIndex, cn)
 		return err
 	}
 
 	hdr, _, _, _, err := parseResponse(item.Key, cn)
-	if err != nil {
-		switch err {
-		case nil, ErrCacheMiss, ErrCASConflict, ErrNotStored, ErrBadIncrDec:
-			_ = c.servers.PutConnection(serverIndex, cn)
-		default:
-			_ = c.servers.CloseConnection(serverIndex, cn)
-		}
+
+	switch err {
+	case nil, ErrCacheMiss, ErrCASConflict, ErrNotStored, ErrBadIncrDec:
+		_ = c.putConnection(serverIndex, cn)
+	default:
+		_ = c.closeConnection(serverIndex, cn)
 		return err
 	}
-	_ = c.servers.PutConnection(serverIndex, cn)
+
 	item.casid = bUint64(hdr[16:24])
 	return nil
 }
@@ -256,13 +280,13 @@ func (c *Client) Delete(key string) error {
 	if err != nil {
 		return err
 	}
-	cn, err := c.servers.GetConnection(serverIndex)
+	cn, err := c.getConnection(serverIndex)
 	if err != nil {
 		return err
 	}
 	err = sendConnCommand(cn, key, cmdDelete, nil, 0, nil)
 	if err != nil {
-		_ = c.servers.CloseConnection(serverIndex, cn)
+		_ = c.closeConnection(serverIndex, cn)
 		return err
 	}
 
@@ -272,9 +296,9 @@ func (c *Client) Delete(key string) error {
 	_, _, _, _, err = parseResponse(key, cn)
 	switch err {
 	case nil, ErrCacheMiss, ErrCASConflict, ErrNotStored, ErrBadIncrDec:
-		_ = c.servers.PutConnection(serverIndex, cn)
+		_ = c.putConnection(serverIndex, cn)
 	default:
-		_ = c.servers.CloseConnection(serverIndex, cn)
+		_ = c.closeConnection(serverIndex, cn)
 	}
 	return err
 }
@@ -311,22 +335,22 @@ func (c *Client) incrDecr(cmd command, key string, delta uint64) (uint64, error)
 	if err != nil {
 		return 0, err
 	}
-	cn, err := c.servers.GetConnection(serverIndex)
+	cn, err := c.getConnection(serverIndex)
 	if err != nil {
 		return 0, err
 	}
 	err = sendConnCommand(cn, key, cmd, nil, 0, extras)
 	if err != nil {
-		_ = c.servers.CloseConnection(serverIndex, cn)
+		_ = c.closeConnection(serverIndex, cn)
 		return 0, err
 	}
 
 	_, _, _, value, err := parseResponse(key, cn)
 	switch err {
 	case nil, ErrCacheMiss, ErrCASConflict, ErrNotStored, ErrBadIncrDec:
-		_ = c.servers.PutConnection(serverIndex, cn)
+		_ = c.putConnection(serverIndex, cn)
 	default:
-		_ = c.servers.CloseConnection(serverIndex, cn)
+		_ = c.closeConnection(serverIndex, cn)
 	}
 	if err != nil {
 		return 0, err
@@ -347,7 +371,7 @@ func (c *Client) Flush(expiration int) error {
 	}
 
 	for serverIndex := uint32(0); serverIndex < c.servers.PoolLen(); serverIndex++ {
-		connection, err := c.servers.GetConnection(serverIndex)
+		connection, err := c.getConnection(serverIndex)
 		if err != nil {
 			failed = append(failed, c.servers.Name(serverIndex))
 			errs = append(errs, err)
@@ -363,9 +387,9 @@ func (c *Client) Flush(expiration int) error {
 		}
 		switch err {
 		case nil, ErrCacheMiss, ErrCASConflict, ErrNotStored, ErrBadIncrDec:
-			_ = c.servers.PutConnection(serverIndex, cn)
+			_ = c.putConnection(serverIndex, cn)
 		default:
-			_ = c.servers.CloseConnection(serverIndex, cn)
+			_ = c.closeConnection(serverIndex, cn)
 		}
 	}
 	if len(failed) > 0 {

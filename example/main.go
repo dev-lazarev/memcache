@@ -15,9 +15,9 @@ func main() {
 			Server:            "localhost:11211",
 			User:              "my_user1",
 			Password:          "my_password",
-			InitialCap:        2,
-			MaxIdle:           4,
-			MaxCap:            5,
+			InitialCap:        100,
+			MaxIdle:           140,
+			MaxCap:            150,
 			IdleTimeout:       15 * time.Second,
 			ConnectionTimeout: 30 * time.Millisecond,
 		},
@@ -37,23 +37,81 @@ func main() {
 		panic(err)
 	}
 
-	count := 100
-	wg := sync.WaitGroup{}
-	wg.Add(count)
-
-	for i, _ := range make([]int64, count) {
-		go func(i int) {
-			defer wg.Done()
-			it, err := mc.Get("sc/seller/id/global/1102131071")
-			if err != nil {
-				fmt.Println(i, "=", err)
-				return
-			}
-			fmt.Println(i, "=", string(it.Value))
-		}(i)
+	it, err := mc.GetMulti([]string{"sc/seller/id/global/1102131071", "sc/seller/id/global/1102131072"})
+	if err != nil {
+		fmt.Println(err)
+		return
+	}
+	for key, item := range it {
+		fmt.Println(key, string(item.Value))
 	}
 
-	wg.Wait()
+	count := 10
+	mu := sync.Mutex{}
+	max := time.Microsecond
+	for range make([]int64, 100) {
+		{
+			wg := sync.WaitGroup{}
+			wg.Add(count)
+			for i, _ := range make([]int64, count) {
+				i := i
+				go func(begin time.Time) {
+					defer func() {
+						wg.Done()
+						since := time.Since(begin)
+						mu.Lock()
+						if max < since {
+							max = since
+						}
+						mu.Unlock()
+					}()
+					it, err := mc.GetMulti([]string{"sc/seller/id/global/1102131071", "sc/seller/id/global/1102131072"})
+					if err != nil {
+						fmt.Println(err)
+						return
+					}
+					for key, item := range it {
+						fmt.Println(i, key, string(item.Value))
+					}
+
+				}(time.Now())
+
+			}
+			wg.Wait()
+		}
+	}
+	fmt.Println(max.String())
+
+	for range make([]int64, 100) {
+		{
+			wg := sync.WaitGroup{}
+			wg.Add(count)
+			for range make([]int64, count) {
+				go func(begin time.Time) {
+					defer func() {
+						wg.Done()
+						since := time.Since(begin)
+						mu.Lock()
+						if max < since {
+							max = since
+						}
+						mu.Unlock()
+					}()
+					it, err := mc.Get("sc/seller/id/global/1102131071")
+					if err != nil {
+						fmt.Println(err)
+						return
+					}
+					fmt.Println(string(it.Value))
+				}(time.Now())
+
+			}
+			wg.Wait()
+		}
+	}
+
+	fmt.Println(max.String())
+
 	//it, err = mc.Get("sc/info/full/seller/3743321700")
 	//if err != nil {
 	//	panic(err)
